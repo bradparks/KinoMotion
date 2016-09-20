@@ -37,7 +37,8 @@ half2 SafeNorm(half2 v)
 // Interleaved gradient function from Jimenez 2014 http://goo.gl/eomGso
 float GradientNoise(float2 uv)
 {
-    uv = floor((uv + _Time.y) * _ScreenParams.xy);
+    //uv = floor((uv + _Time.y) * _ScreenParams.xy);
+    uv = floor(uv * _ScreenParams.xy);
     float f = dot(float2(0.06711056f, 0.00583715f), uv);
     return frac(52.9829189f * frac(f));
 }
@@ -77,7 +78,7 @@ half2 RNMix(half2 a, half2 b, half p)
 // Velocity sampling function
 half3 SampleVelocity(float2 uv)
 {
-    half3 v = tex2D(_VelocityTex, uv).xyz;
+    half3 v = tex2Dlod(_VelocityTex, float4(uv, 0, 0)).xyz;
     return half3((v.xy * 2 - 1) * _MaxBlurRadius, v.z);
 }
 
@@ -104,9 +105,148 @@ half SampleWeight(half2 d_n, half l_v_c, half z_p, half T, float2 S_uv, half w_A
     return weight;
 }
 
+    float nrand(float2 uv)
+    {
+        return frac(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453);
+    }
+
+    float cone(float T, float l_V)
+    {
+        return saturate(1.0 - T / l_V);
+    }
+
+    float cylinder(float T, float l_V)
+    {
+        return 1.0 - smoothstep(0.95 * l_V, 1.05 * l_V, T);
+    }
+
+    float soft_depth_compare(float za, float zb)
+    {
+        return saturate(1.0 - (zb - za) / 0.001);
+    }
+
+int _LoopCount2;
+
+sampler2D _Source2;
+
 // Reconstruction fragment shader
 half4 frag_Reconstruction(v2f_multitex i) : SV_Target
 {
+#if 1
+    float2 p = i.uv1 * _ScreenParams.xy;
+    float2 p_uv = i.uv1;
+
+    // Nonfiltered source color;
+    half4 source = tex2D(_MainTex, i.uv0);
+
+    // Velocity vector at p.
+    half3 v_c_t = SampleVelocity(p_uv);
+    half2 v_c = v_c_t.xy;
+    half l_v_c = max(length(v_c), 0.5);
+
+    // NeighborMax vector at p (with small).
+    half2 v_max = tex2D(_NeighborMaxTex, p_uv + JitterTile(p_uv)).xy;
+    half l_v_max = length(v_max);
+
+    // Escape early if the NeighborMax vector is too short.
+    if (l_v_max < 0.5) return source;
+
+    // Linearized depth at p.
+    half z_p = v_c_t.z;
+
+    // The center sample.
+    half sampleCount = _LoopCount * 2.0f;
+    half totalWeight = sampleCount / l_v_c;
+    half3 result = source.rgb * totalWeight;
+
+    // Start from t=-1 + small jitter.
+    // The width of jitter is equivalent to 4 sample steps.
+    half sampleJitter = 4.0 * 2 / (sampleCount + 4);
+    half t = -1.0 + GradientNoise(p_uv) * sampleJitter;
+    half dt = (2.0 - sampleJitter) / sampleCount;
+
+    UNITY_LOOP for (int c = 0; c < _LoopCount*2; c++)
+    {
+        float T = abs(l_v_max * t);
+
+        float2 Y_uv = p_uv + v_max * t * _MainTex_TexelSize.xy;
+
+        float3 hoge = SampleVelocity(Y_uv);
+
+        float2 V_Y = hoge.xy;
+        float l_V_Y = length(V_Y);
+
+        float Z_Y = hoge.z;
+
+        float f = soft_depth_compare(z_p, Z_Y);
+        float b = soft_depth_compare(Z_Y, z_p);
+
+        float alpha = 0;
+        alpha += f * cone(T, l_v_c);
+        alpha += b * cone(T, l_v_c);
+        alpha += cylinder(T, l_V_Y) * cylinder(T, l_v_c) * 2;
+
+        totalWeight += alpha;
+        //result += tex2Dlod(_MainTex, float4(Y_uv, 0, 0)).rgb * alpha;
+        result += tex2Dlod(_Source2, float4(Y_uv, 0, 0)).rgb * alpha;
+
+        t += dt;
+    }
+
+    return float4(result / totalWeight, 1);
+#endif
+
+#if 0
+    float2 X = i.uv1 / _MainTex_TexelSize.xy;
+    float2 X_uv = i.uv1;
+
+    float2 jitter = float2(
+        nrand(X_uv + float2(2, 3)),
+        nrand(X_uv + float2(7, 5))
+    );
+    jitter *= _NeighborMaxTex_TexelSize.xy / 2;
+
+    float2 V_X = tex2D(_VelocityTex, X_uv).xy;
+    float2 V_N = tex2D(_NeighborMaxTex, X_uv + jitter).xy;
+    float  Z_X = Linear01Depth(SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, X_uv));
+
+    float l_V_X = length(V_X);
+    float l_V_N = length(V_N);
+
+    float weight = 1.0 / max(length(V_X), 0.5);
+    float3 sum = tex2D(_MainTex, i.uv1).rgb * weight;
+
+    float t = -1.0 + nrand(X_uv) / (_LoopCount + 1);
+    for (int c = 0; c < _LoopCount; c++)
+    {
+        float T = abs(l_V_N * t);
+
+        float2 Y = X + V_N * t;
+        float2 Y_uv = Y * _MainTex_TexelSize.xy;
+
+        float2 V_Y = tex2D(_VelocityTex, Y_uv);
+        float l_V_Y = length(V_Y);
+
+        float  Z_Y = Linear01Depth(SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, Y_uv));
+
+        float f = soft_depth_compare(Z_X, Z_Y);
+        float b = soft_depth_compare(Z_Y, Z_X);
+
+        float alpha = 0;
+        alpha += f * cone(T, l_V_Y);
+        alpha += b * cone(T, l_V_X);
+        alpha += cylinder(T, l_V_Y) * cylinder(T, l_V_X) * 2;
+
+        weight += alpha;
+        sum += tex2D(_MainTex, Y_uv).rgb * alpha;
+
+        t += 2.0 / (_LoopCount + 1);
+    }
+
+    return float4(sum / weight, 1);
+#endif
+
+#if 0
     float2 p = i.uv1 * _ScreenParams.xy;
     float2 p_uv = i.uv1;
 
@@ -183,4 +323,5 @@ half4 frag_Reconstruction(v2f_multitex i) : SV_Target
     }
 
     return half4(result / totalWeight, source.a);
+#endif
 }

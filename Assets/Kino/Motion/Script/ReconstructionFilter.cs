@@ -108,15 +108,24 @@ namespace Kino
                 Graphics.Blit(tile, neighborMax, _material, 4);
                 ReleaseTemporaryRT(tile);
 
+                var vbuffer2 = GetTemporaryRT(source, 2, _packedRTFormat);
+                var source2 = GetTemporaryRT(source, 2, RenderTextureFormat.ARGB32);
+                Graphics.Blit(vbuffer, vbuffer2);
+                Graphics.Blit(source, source2);
+
                 // 6th pass - Reconstruction pass
                 _material.SetInt("_LoopCount", Mathf.Clamp(sampleCount / 2, 1, 64));
+                _material.SetInt("_LoopCount2", Mathf.Clamp(sampleCount, 1, 64));
                 _material.SetFloat("_MaxBlurRadius", maxBlurPixels);
                 _material.SetTexture("_NeighborMaxTex", neighborMax);
-                _material.SetTexture("_VelocityTex", vbuffer);
+                _material.SetTexture("_VelocityTex", vbuffer2);
+                _material.SetTexture("_Source2", source2);
                 Graphics.Blit(source, destination, _material, _unroll ? 6 : 5);
 
                 // Cleaning up
                 ReleaseTemporaryRT(vbuffer);
+                ReleaseTemporaryRT(vbuffer2);
+                ReleaseTemporaryRT(source2);
                 ReleaseTemporaryRT(neighborMax);
             }
 
